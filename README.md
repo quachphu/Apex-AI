@@ -10,7 +10,7 @@ Video Demo: https://youtu.be/bMP9iGPU7H0
 
 ## The Problem
 
-Every B2C business has the same bottleneck: someone has to call leads, qualify them, handle objections, send follow-ups, and collect payment. That pipeline takes a human SDR 45+ minutes per conversion. Most businesses can't afford to hire one. The ones that do convert less than 5% of cold leads because the follow-up is too slow.
+Every B2C business has the same bottleneck: someone has to receive or call leads, qualify them, handle objections, send follow-ups, and collect payment. That pipeline takes a human SDR 45+ minutes per conversion. Most businesses can't afford to hire one. The ones that do convert less than 5% of cold leads because the follow-up is too slow.
 
 ## What Apex Does
 
