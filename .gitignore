@@ -1,0 +1,59 @@
+# ─── Environment & Secrets ────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.env
+
+# ─── Python ───────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+pip-log.txt
+
+# ─── Node / Frontend ──────────────────────────────────────────────
+node_modules/
+dist/
+.next/
+out/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ─── macOS ────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# ─── IDE ──────────────────────────────────────────────────────────
+.cursor/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ─── Logs & Runtime ───────────────────────────────────────────────
+*.log
+logs/
+/tmp/
+
+# ─── Certificates & Keys ──────────────────────────────────────────
+*.pem
+*.key
+*.cert
+*.p12
+
+# ─── Test Artifacts ───────────────────────────────────────────────
+.coverage
+htmlcov/
+.pytest_cache/

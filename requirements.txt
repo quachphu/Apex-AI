@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+httpx
+agentmail
+stripe
+supermemory
+google-genai
+websockets
+sse-starlette
+moss

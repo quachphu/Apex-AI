@@ -1,0 +1,1028 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  APEX — AI OUTBOUND SALES AGENT
+  Comprehensive Architecture Reference  (as-built)
+  YC Call My Agent Hackathon · May 17, 2026
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. PROJECT OVERVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Apex is a fully autonomous AI sales agent for CoreFlow Pilates Studio.
+It cold-calls leads, qualifies them live, handles product objections
+with real-time semantic search, closes verbally, then automatically sends
+a personalized follow-up email with a Stripe payment link — all with zero
+human involvement.
+
+Every step of the sales loop is tracked on a live React dashboard via
+Server-Sent Events (SSE).
+
+  Demo persona : Maya (AI voice agent)
+  Demo lead    : Sarah K. · +17143101206 · quachphuwork@gmail.com
+  Demo product : $30 beginner trial class · CoreFlow Pilates · Santa Monica
+  Demo goal    : Complete a full cold-call → qualify → close → pay loop
+                 demonstrable in under 90 seconds
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. HIGH-LEVEL SYSTEM DIAGRAM
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ┌───────────────────────────────────────────────────────────────────┐
+  │  REACT DASHBOARD (http://localhost:5173)                          │
+  │  Notion-style white UI · Vite + TailwindCSS                      │
+  │  ▶ Start Campaign button                                         │
+  │  Cards: Lead Info · Transcript · Pipeline · Moss Log · API Log   │
+  │  Connected via SSE → /api/events (auto-reconnects every 2s)      │
+  └──────────────────────────┬────────────────────────────────────────┘
+                             │ POST /api/start-campaign
+                             ▼
+  ┌───────────────────────────────────────────────────────────────────┐
+  │  FASTAPI BACKEND (http://localhost:8000)                          │
+  │  uvicorn · asyncio · python-dotenv                               │
+  │                                                                   │
+  │  Startup:                                                         │
+  │    1. asyncio.Queue() assigned to call_state["sse_queue"]        │
+  │    2. initialize_moss()  — load/create Moss index                │
+  │    3. initialize_inbox() — get or create AgentMail inbox         │
+  │                                                                   │
+  │  On Start Campaign:                                               │
+  │    1. reset_state() — clear in-memory state                      │
+  │    2. Validate WEBHOOK_URL is configured                         │
+  │    3. Create (or reuse) AgentPhone agent — Maya persona          │
+  │    4. Upsert webhook: POST /v1/webhooks                          │
+  │    5. Get or provision US phone number                           │
+  │    6. Attach number to agent                                      │
+  │    7. Initiate outbound call: POST /v1/calls                     │
+  └──────────────────────────┬────────────────────────────────────────┘
+                             │ AgentPhone dials +17143101206
+                             ▼
+  ┌───────────────────────────────────────────────────────────────────┐
+  │  AGENTPHONE (https://api.agentphone.ai/v1)                        │
+  │  · Twilio-backed phone infrastructure                             │
+  │  · Streaming STT — mode: "accurate"                              │
+  │  · TTS — voice: "Polly.Joanna" (AWS Polly, female US English)    │
+  │  · ambientSound: "office"                                        │
+  │  · contextLimit: 10 (recent history turns passed back)           │
+  │  · Barge-in supported (lead can interrupt at any time)           │
+  │  · Each lead utterance → POST /webhook/voice                     │
+  │  · Call end → POST /webhook/voice (event: agent.call_ended)      │
+  └──────────────────────────┬────────────────────────────────────────┘
+                             │ POST /webhook/voice
+                             │ body: {event, channel, data, recentHistory}
+                             ▼
+  ┌───────────────────────────────────────────────────────────────────┐
+  │  VOICE WEBHOOK HANDLER  (backend/voice_handler.py)                │
+  │  → handle_voice_turn(caller_text, recent_history)                │
+  │  Returns: StreamingResponse(application/x-ndjson)                │
+  └──────────┬─────────────────────────────────────────┬─────────────┘
+             │                                         │
+      ┌──────▼───────┐   ┌──────────────┐   ┌────────▼────────┐
+      │     MOSS     │   │ SUPERMEMORY  │   │  GEMINI 2.0     │
+      │              │   │              │   │  FLASH          │
+      │ Semantic FAQ │   │ Lead profile │   │                 │
+      │ retrieval    │   │ recall via   │   │ genai.Client    │
+      │ <10ms        │   │ containerTag │   │ max_tokens: 120 │
+      │              │   │ = phone num  │   │ temperature:0.5 │
+      │ 8 indexed    │   │              │   │                 │
+      │ documents    │   │ Runs on each │   │ system_prompt   │
+      │ keyword      │   │ voice turn   │   │ injected with:  │
+      │ fallback if  │   │              │   │ · current_stage │
+      │ SDK missing  │   │              │   │ · turn_count    │
+      └──────────────┘   └──────────────┘   │ · has_closed    │
+                                            │ · moss_context  │
+                                            │ · memory_context│
+                                            └─────────────────┘
+
+
+  ── CALL CLOSE DETECTED ─────────────────────────────────────────────
+
+  ┌───────────────────────────────────────────────────────────────────┐
+  │  POST-CALL PIPELINE  (asyncio.create_task, fires 1.5s after TTS) │
+  │                                                                   │
+  │  ① Stripe.checkout.Session.create($30, customer_email)           │
+  │     → returns payment URL                                        │
+  │  ② AgentMail.inboxes.messages.send(to, subject, body + URL)      │
+  │     → pipeline["email_sent"] = True                              │
+  └──────┬──────────────────────────┬────────────────────────────────┘
+         │                          │
+         ▼                          ▼
+  ┌────────────┐             ┌──────────────────────────────────────┐
+  │   STRIPE   │             │            AGENTMAIL                 │
+  │            │             │                                      │
+  │ Checkout   │             │ inbox: apex-maya@agentmail.to        │
+  │ Session    │             │ display_name: Maya from CoreFlow     │
+  │ mode:      │             │                                      │
+  │ "payment"  │             │ Subject: "Your CoreFlow Pilates      │
+  │ $30.00 USD │             │  Trial — Saturday 10 AM"            │
+  │            │             │                                      │
+  │ success_url│             │ Body: personalized first name +      │
+  │ cancel_url │             │ Stripe link + address + phone        │
+  │ metadata:  │             └──────────────────────────────────────┘
+  │ source=apex│
+  └─────┬──────┘
+        │ Lead clicks link → pays
+        │ POST /webhook/stripe
+        ▼
+  ┌───────────────────────────────────────────────────────────────────┐
+  │  STRIPE WEBHOOK — checkout.session.completed or                  │
+  │                   payment_intent.succeeded                       │
+  │  → pipeline["stripe_paid"] = True                               │
+  │  → SSE event: stripe_paid → dashboard payment card shows        │
+  └───────────────────────────────────────────────────────────────────┘
+
+
+  ── CALL ENDS ────────────────────────────────────────────────────────
+
+  ┌───────────────────────────────────────────────────────────────────┐
+  │  agent.call_ended webhook → handle_call_ended()                  │
+  │                                                                   │
+  │  ① Supermemory.add(full transcript, containerTag=phone)          │
+  │     → pipeline["memory_saved"] = True                           │
+  │  ② status = "ended"                                              │
+  │  ③ SSE event: call_ended → dashboard status updates             │
+  └───────────────────────────────────────────────────────────────────┘
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. FILE STRUCTURE  (complete, as-built)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  apex/
+  ├── backend/
+  │   ├── __init__.py          Empty — marks backend as Python package
+  │   ├── main.py              FastAPI app, all routes, startup lifecycle
+  │   ├── voice_handler.py     Voice turn logic, Gemini, NDJSON streaming
+  │   ├── state.py             Shared in-memory call_state dict + helpers
+  │   ├── prompts.py           Maya system prompt + MAYA_BEGIN_MESSAGE
+  │   ├── moss_client.py       Moss semantic search + keyword fallback
+  │   ├── memory_client.py     Supermemory store/recall
+  │   ├── stripe_client.py     Stripe Checkout Session creation
+  │   └── mail_client.py       AgentMail inbox init + email send
+  │
+  ├── frontend/
+  │   ├── src/
+  │   │   ├── App.jsx          Full React dashboard (single component file)
+  │   │   ├── index.css        Tailwind directives + custom animations
+  │   │   └── main.jsx         React 18 entry point (createRoot)
+  │   ├── index.html           HTML shell, loads Inter font from Google
+  │   ├── vite.config.js       Vite + @vitejs/plugin-react
+  │   ├── tailwind.config.js   Notion-inspired color palette
+  │   ├── postcss.config.js    tailwindcss + autoprefixer
+  │   └── package.json         React 18, Vite 5, TailwindCSS 3 deps
+  │
+  ├── .env                     All API keys (gitignored)
+  ├── .env.example             Key names with empty values (safe to commit)
+  ├── .gitignore               Protects .env, node_modules, __pycache__
+  ├── requirements.txt         Python 3.11+ dependencies
+  ├── Makefile                 install / run-backend / run-frontend / tunnel
+  ├── start.sh                 One-command startup (ngrok + backend + frontend)
+  ├── README.md                YC-style project README
+  └── architecture.txt         This file
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. ENVIRONMENT VARIABLES  (.env)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Key                    Service        Notes
+  ─────────────────────────────────────────────────────────────────────────
+  Agent_phone_key        AgentPhone     Bearer token for all /v1/* calls
+  MOSS_PROJECT_ID        Moss           UUID for the Moss project
+  MOSS_PROJECT_KEY       Moss           API key for the Moss project
+  Agent_mail_S25         AgentMail      API key (am_us_... prefix)
+  SUPERMEMORY_API_KEY    Supermemory    API key (sm_... prefix)
+  Stripe_secret_key      Stripe         sk_test_... (test mode)
+  Stripe_publishable_key Stripe         pk_test_... (unused in backend)
+  GEMINI_API_KEY         Google AI      AIzaSy... key from aistudio.google.com
+  WEBHOOK_URL            Tunnel         Public HTTPS URL → routes to :8000
+
+  Note: .env is loaded at startup in each backend module via:
+    load_dotenv(Path(__file__).resolve().parent.parent / '.env')
+  This resolves to apex/.env regardless of the working directory.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. PYTHON DEPENDENCIES  (requirements.txt)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Package             Role
+  ─────────────────────────────────────────────────────────────────────────
+  fastapi             Web framework — async HTTP + route definitions
+  uvicorn[standard]   ASGI server — runs FastAPI with websocket support
+  python-dotenv       Loads .env into os.environ at module import time
+  httpx               Async HTTP client — used for all AgentPhone API calls
+  agentmail           Official AgentMail Python SDK
+  stripe              Official Stripe Python SDK
+  supermemory         Official Supermemory Python SDK
+  google-genai        Google Generative AI SDK (genai.Client pattern)
+  websockets          WebSocket support (used by uvicorn[standard])
+  sse-starlette       Server-Sent Events for FastAPI (/api/events stream)
+  moss                Moss semantic search SDK (keyword fallback if missing)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. BACKEND — FILE-BY-FILE REFERENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+────────────────────────────────────────────────────────────
+6.1  state.py  —  Shared in-memory state
+────────────────────────────────────────────────────────────
+
+  call_state (module-level dict, shared across all request handlers):
+
+  Field                Type        Description
+  ─────────────────────────────────────────────────────────────────────────
+  status               str         "idle" | "calling" | "active" | "ended"
+                                   | "followup_active"
+  lead                 dict|None   {"name", "phone", "email"}
+  transcript           list        [{"role": "agent"|"lead", "text": str}]
+  moss_queries         list        [{"query", "result", "latency_ms"}]
+  pipeline             dict        5 boolean flags (see §9)
+  memory_recall        str|None    Supermemory recall result for follow-up
+  stripe_payment_url   str|None    Stripe Checkout Session URL
+  call_id              str|None    AgentPhone call ID
+  agent_id             str|None    AgentPhone agent ID (reused across calls)
+  sse_queue            Queue|None  asyncio.Queue — all SSE events enqueued here
+  conversation_stage   str         "INTRO" | "QUALIFY" | "PITCH" | "CLOSE"
+                                   | "CONFIRMED" | "DECLINED"
+  turn_count           int         Number of lead utterances processed
+  has_closed           bool        True once close signal detected
+  call_complete        bool        True after [CALL_COMPLETE] token — hard stop
+  objection_count      int         Number of Moss queries fired this call
+
+  Key functions:
+
+  infer_stage(transcript, has_closed) → str
+    · has_closed=True          → "CONFIRMED"
+    · len(transcript) == 0     → "INTRO"
+    · len(transcript) <= 2     → "QUALIFY"
+    · len(transcript) <= 4     → "PITCH"
+    · len(transcript) > 4      → "CLOSE"
+
+  reset_state()
+    · Called at the start of every new campaign
+    · Resets all fields to defaults (preserves agent_id separately in main.py)
+
+────────────────────────────────────────────────────────────
+6.2  prompts.py  —  Maya's personality and sales script
+────────────────────────────────────────────────────────────
+
+  MAYA_SYSTEM_PROMPT
+    · Python format string — three placeholders injected at runtime:
+        {current_stage}    — from infer_stage()
+        {turn_count}       — from call_state["turn_count"]
+        {has_closed}       — from call_state["has_closed"]
+
+  6 STAGE DEFINITIONS embedded in the prompt:
+
+    Stage 1 — INTRO
+      Exact line: "Hi! This is Maya calling from CoreFlow Pilates in
+      Santa Monica. I'll keep it super quick — have you ever tried
+      pilates before, or would this be your first time?"
+
+    Stage 2 — QUALIFY
+      Branches on YES / NO / unclear. Each branch has exact scripted text.
+
+    Stage 3 — PITCH
+      Max 2 sentences. Answers questions from product knowledge, redirects
+      to "Would Saturday morning at 10 AM work for you?"
+
+    Stage 4 — CLOSE
+      Exact line: "I'd love to lock in that Saturday 10 AM spot for you.
+      Can I send a quick payment link to your email?"
+
+    Stage 5 — CONFIRMED
+      Outputs one of two scripted closing lines + [CALL_COMPLETE] token.
+      No further engagement permitted.
+
+    Stage 6 — DECLINED
+      Offers to send info by email. Wraps up politely.
+
+  10 ABSOLUTE RULES in the prompt:
+    1. Never repeat a question already asked
+    2. Never repeat a pitch already made
+    3. Never re-engage after [CALL_COMPLETE]
+    4. No medical claims
+    5. Never negotiate below $25
+    6. 1–3 sentences maximum per response
+    7. Garbled input → "Sorry, you broke up — are you still there?"
+    8. Off-topic → redirect to CoreFlow trial
+    9. No markdown/asterisks/bullets — spoken words only
+    10. Post-close utterance → one wrap-up then stop
+
+  MAYA_BEGIN_MESSAGE
+    · Static string used as the greeting when the call connects
+    · "Hi! This is Maya calling from CoreFlow Pilates in Santa Monica..."
+
+  PRODUCT KNOWLEDGE embedded in prompt (7 categories):
+    Pricing, Schedule, Location, Pilates vs Yoga, Instructor,
+    Cancellation, Price Objection Scripts
+
+────────────────────────────────────────────────────────────
+6.3  voice_handler.py  —  Core voice turn logic
+────────────────────────────────────────────────────────────
+
+  GEMINI CLIENT
+    · Lazy singleton: get_gemini_client()
+    · Uses: genai.Client(api_key=GEMINI_API_KEY)
+    · SDK: google-genai (new Google SDK pattern, not google-generativeai)
+    · Wrapped in try/except import — GEMINI_AVAILABLE flag set to False
+      if SDK missing
+
+  MOSS_TRIGGERS (50+ keywords in 8 categories)
+    Pricing, Schedule, Location, Pilates vs Yoga, Beginner, Instructor,
+    Cancellation, Price Objection
+
+  IGNORE_PATTERNS (8 patterns)
+    Off-topic phrases that should not trigger Moss:
+    "pirate", "engineer", "are you a robot", "are you ai", etc.
+
+  should_query_moss(text) → bool
+    · Returns False immediately if any IGNORE_PATTERN matches
+    · Returns True if any MOSS_TRIGGER keyword matches
+
+  _is_garbled(text) → bool  (3 checks)
+    1. Empty or length < 2
+    2. Single filler words: "um", "uh", "hmm", "ok", "yeah", "mhm"
+    3. len(words) <= 2 AND len(text) < 5
+    4. Repetition ratio: unique words < 40% of total words
+
+  _fallback_response(caller_text, moss_context, current_stage) → str
+    · Priority 1: Use moss_context first sentence if available
+    · Priority 2: Detect yes/no intent in caller_text
+    · Priority 3: Stage-specific canned response map
+
+  emit_event(event_type, data) → async
+    · Puts {"type": event_type, "data": data} onto call_state["sse_queue"]
+    · Silently no-ops if queue is None
+
+  handle_voice_turn(caller_text, recent_history) → AsyncGenerator[bytes]
+    Full execution sequence per turn:
+
+    Guard 1   call_complete == True
+              → yield "You're all set! Have a great day!" → return
+
+    Guard 2   has_closed == True
+              → yield wrap-up line → set call_complete=True → return
+
+    Guard 3   _is_garbled(caller_text)
+              → yield "Sorry, you broke up there" → return
+
+    Step 1    Increment turn_count, append lead turn to transcript,
+              emit SSE transcript event
+
+    Step 2    If turn_count > 2: yield random interim filler
+              ["Let me check that.", "Great question.", "Sure!", "Absolutely."]
+              (prevents dead silence while async work runs)
+
+    Step 3    If should_query_moss(caller_text):
+              → await query_moss() → store result + latency
+              → emit SSE moss_query event
+              → set pipeline["objection_handled"] = True
+              → increment objection_count
+
+    Step 4    If lead set: await recall_lead(phone)
+              → if result: store in memory_recall, emit SSE memory_recall
+
+    Step 5    current_stage = infer_stage(transcript, has_closed)
+
+    Step 6    Build system_with_stage:
+              MAYA_SYSTEM_PROMPT.format(stage, turn_count, has_closed)
+              + append moss_context if present
+              + append memory_context if present
+
+    Step 7    Build Gemini contents list:
+              For each transcript turn (except last):
+                role "agent" → "model", role "lead" → "user"
+                Wrap in genai_types.Content(role, parts=[Part(text)])
+              Append current caller_text as final user Content
+
+    Step 8    Call Gemini:
+              gemini_client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=contents,
+                config=GenerateContentConfig(
+                  system_instruction=system_with_stage,
+                  max_output_tokens=120,
+                  temperature=0.5
+                )
+              )
+              Run in executor (thread pool) to avoid blocking event loop
+              Strip *, #, _ from response
+
+    Step 9    If no agent_text: use _fallback_response()
+
+    Step 10   If "[CALL_COMPLETE]" in agent_text:
+              → strip token → set has_closed=True, call_complete=True
+              → asyncio.create_task(trigger_post_call_pipeline())
+
+    Step 11   If close signals in agent_text and not already closed:
+              → set has_closed=True
+              → asyncio.create_task(trigger_post_call_pipeline())
+              Close signals: "sending that to your email", "sending the link",
+              "see you saturday", "you're all set", "check your email",
+              "looking forward to seeing you"
+
+    Step 12   Append agent turn to transcript, emit SSE transcript event
+
+    Step 13   yield final NDJSON: {"text": agent_text}
+
+  trigger_post_call_pipeline() — async background task
+    1. asyncio.sleep(1.5)  — let TTS finish speaking
+    2. create_payment_link(email, 3000, description) → payment_url
+    3. send_followup(to_email, lead_name, payment_url)
+    4. If email sent: set pipeline["email_sent"]=True, emit SSE events
+
+  handle_call_ended(call_id, body) — async
+    1. store_call(phone, name, transcript, qualified, notes)
+    2. If stored: pipeline["memory_saved"]=True, emit SSE pipeline_update
+    3. status = "ended", emit SSE call_ended with durationSeconds
+
+────────────────────────────────────────────────────────────
+6.4  moss_client.py  —  Real-time FAQ retrieval
+────────────────────────────────────────────────────────────
+
+  MOSS_DOCS — 8 hardcoded documents:
+
+    ID                Content summary
+    ──────────────────────────────────────────────────────────
+    pricing           $30 trial / $150 monthly / free reformer
+    schedule          Sat 10AM / Tue 6PM / Thu 7PM / 24h advance
+    location          123 Main St Santa Monica / free parking
+    vs-yoga           Pilates vs yoga differences + 3-4 session gains
+    beginners         Beginner-friendly, no equipment, private attention
+    cancellation      24h refund / same-day reschedule / pause policy
+    objection-cost    Risk-free $30 vs yoga drop-in / private session
+    instructor        Sofia Rivera PMA certified / 8 years / desk rehab
+
+  INDEX_NAME = "coreflow-pilates"
+
+  initialize_moss() — runs at FastAPI startup
+    1. Skip if MOSS_AVAILABLE=False (SDK import failed)
+    2. Try to load existing cloud index
+    3. If not found: create index with 8 docs using "moss-minilm" model
+    4. Set _index_loaded=True on success
+    5. On any error: fall through to keyword fallback
+
+  query_moss(question) → {"result": str, "latency_ms": int}
+    · If _index_loaded: query(top_k=2, alpha=0.7) → first doc text
+    · Else: _keyword_fallback(question)
+    · Both paths return the same dict shape
+
+  _keyword_fallback(question) → str
+    · Priority order: expensive/refund → price → yoga → schedule →
+      cancel → beginner → location → instructor → default pricing
+    · Returns full MOSS_DOCS text for matched category
+    · Latency typically <1ms
+
+  MOSS_AVAILABLE flag:
+    · Set False if "from moss import MossClient" fails (import error)
+    · The inferedge-moss-core native dependency may not be on PyPI
+    · Keyword fallback makes the demo 100% functional regardless
+
+────────────────────────────────────────────────────────────
+6.5  memory_client.py  —  Supermemory integration
+────────────────────────────────────────────────────────────
+
+  get_client() — lazy singleton
+    · Supermemory(api_key=SUPERMEMORY_API_KEY)
+    · Returns None if SDK not installed or key missing
+
+  store_call(phone, name, transcript, qualified, notes) → bool
+    · Formats transcript as "ROLE: text" lines
+    · Calls client.add(content, container_tags=[phone], metadata={...})
+    · containerTag = phone number (e.g., "+17143101206")
+    · All memories for a lead live under this tag
+    · Returns True on success, False on any exception
+
+  recall_lead(phone) → str
+    · Primary: client.profile(container_tag=phone)
+      → combines profile.static + profile.dynamic
+    · Fallback: client.search.documents(q="CoreFlow Pilates call",
+                                        container_tags=[phone])
+      → returns first result content[:500]
+    · Returns "" if nothing found or any error
+
+  Memory model:
+    · containerTag = phone number  (partitions all data per lead)
+    · First call: recall returns "" (no history yet)
+    · After call_ended: full transcript stored
+    · Follow-up call: recall returns enriched lead profile
+
+────────────────────────────────────────────────────────────
+6.6  stripe_client.py  —  Payment collection
+────────────────────────────────────────────────────────────
+
+  create_payment_link(customer_email, amount_cents, description) → str
+    · stripe.checkout.Session.create(
+        payment_method_types=["card"],
+        mode="payment",
+        amount_cents=3000  ($30.00 USD),
+        customer_email=customer_email,
+        success_url="https://coreflowpilates.com/success?session_id=...",
+        cancel_url="https://coreflowpilates.com/pricing",
+        metadata={source: "apex_ai_sdr", lead_email: customer_email}
+      )
+    · Returns session.url (hosted Stripe Checkout page)
+    · On any error: returns "https://buy.stripe.com/test_demo_link"
+    · Currently in Stripe TEST mode (sk_test_... key)
+
+  Webhook handling (in main.py):
+    · Listens for checkout.session.completed OR payment_intent.succeeded
+    · No signature verification in demo (add stripe.Webhook.construct_event
+      for production)
+
+────────────────────────────────────────────────────────────
+6.7  mail_client.py  —  Follow-up email
+────────────────────────────────────────────────────────────
+
+  get_client() — lazy singleton
+    · AgentMail(api_key=Agent_mail_S25)
+
+  initialize_inbox() — runs at FastAPI startup
+    · client.inboxes.list() — check for existing inboxes
+    · If found: reuse first inbox (stores inbox_id)
+    · If not found: client.inboxes.create(
+        request=CreateInboxRequest(
+          username="apex-maya",
+          display_name="Maya from CoreFlow Pilates"
+        )
+      )
+    · Stores _inbox_id for all subsequent sends
+
+  send_followup(to_email, lead_name, payment_url) → bool
+    · Email body: personalized greeting + payment link + studio address
+    · Subject: "Your CoreFlow Pilates Trial — Saturday 10 AM"
+    · client.inboxes.messages.send(inbox_id, to=[email], subject, text)
+    · Returns True on success
+
+  Inbox address: apex-maya@agentmail.to (or similar assigned address)
+
+────────────────────────────────────────────────────────────
+6.8  main.py  —  FastAPI application and routes
+────────────────────────────────────────────────────────────
+
+  App config:
+    · CORS: allow_origins=["*"] (open for demo)
+    · _apex_agent_id: module-level — reused across calls to avoid
+      creating duplicate AgentPhone agents
+
+  @app.on_event("startup")
+    · call_state["sse_queue"] = asyncio.Queue()
+    · await initialize_moss()
+    · await initialize_inbox()
+
+  Hardcoded lead list:
+    LEADS = [{"name": "Sarah K.", "phone": "+17143101206",
+              "email": "quachphuwork@gmail.com"}]
+
+  Routes:
+
+  GET  /api/events
+    · EventSourceResponse (sse-starlette)
+    · Immediately yields current full state snapshot on connect
+    · Loops: awaits queue with 25s timeout → yields event
+    · On timeout: yields ping event (keepalive)
+    · Client disconnects: breaks loop
+
+  POST /api/start-campaign
+    · reset_state() + new asyncio.Queue()
+    · Validate WEBHOOK_URL (returns 400 if not set)
+    · AgentPhone Step 1: Create agent if _apex_agent_id is None
+        POST /v1/agents {name, voiceMode:"webhook", beginMessage,
+                         voice:"Polly.Joanna", sttMode:"accurate",
+                         ambientSound:"office"}
+    · AgentPhone Step 2: Upsert webhook
+        POST /v1/webhooks {url: WEBHOOK_URL/webhook/voice, contextLimit:10}
+    · AgentPhone Step 3: Get or provision number
+        GET /v1/numbers → use first item, or POST /v1/numbers {country:"US"}
+    · AgentPhone Step 4: Attach number to agent
+        POST /v1/agents/{id}/numbers {numberId}
+    · AgentPhone Step 5: Initiate call
+        POST /v1/calls {agentId, toNumber, initialGreeting, voice}
+    · Sets pipeline["call_connected"]=True, status="active"
+    · All HTTP via httpx.AsyncClient(timeout=30)
+
+  POST /webhook/voice
+    · Parses JSON body: {event, channel, data, recentHistory}
+    · If event=="agent.message" and channel=="voice":
+        Extract caller_text from data.transcript | data.message |
+        body.message.content
+        If empty text: return {"text": ""} NDJSON immediately
+        Else: StreamingResponse(handle_voice_turn generator)
+    · If event=="agent.call_ended":
+        asyncio.create_task(handle_call_ended(...))
+        return {"ok": True}
+
+  POST /webhook/stripe
+    · Parses Stripe webhook payload
+    · On checkout.session.completed or payment_intent.succeeded:
+        pipeline["stripe_paid"]=True
+        emit SSE pipeline_update + stripe_paid events
+    · No signature verification (demo mode)
+
+  POST /api/simulate-payment
+    · Fires stripe_paid SSE events manually (demo backup button)
+
+  POST /api/followup-call
+    · Calls recall_lead(phone) → if empty, uses hardcoded demo memory
+    · Sets call_state["memory_recall"]
+    · Emits SSE memory_recall + status_change("followup_active")
+
+  GET  /health
+    · Returns {status, call_status, moss_queries count,
+               transcript_turns count, pipeline}
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. FRONTEND — REACT DASHBOARD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Stack: React 18 · Vite 5 · TailwindCSS 3 · Inter font (Google Fonts)
+  Theme: Notion-inspired white/light design
+         Background: #f7f6f3 · Cards: #ffffff · Border: #e9e8e4
+         Text: #37352f (Notion dark) · Muted: #787774 · Faint: #9b9a97
+         Accent green: #0f9b58 · blue: #337ea9 · yellow: #cb912f · purple: #6940a5
+
+  Layout:
+    · Sticky top nav: logo + pipeline breadcrumb dots + StatusBadge + Start button
+    · Row 1 (3 cols): Lead Queue | Transcript | Pipeline
+    · Row 2 (2 cols): Moss Log | API Activity Log
+
+  React Components (all in App.jsx):
+
+    StatusBadge({ status })
+      Pill with colored dot. 5 states: Ready / Dialing / Live Call /
+      Call Ended / Follow-up. Dot blinks during active states.
+
+    Card({ children, className })
+      White rounded-xl with border + shadow-notion wrapper
+
+    SectionLabel({ children, right })
+      11px uppercase tracking-widest section header with optional right label
+
+    PipelineStep({ label, done, index })
+      Numbered square (1-5) → fills green with checkmark when done.
+      Appends "Done" pill on completion.
+
+    TranscriptBubble({ turn })
+      Avatar circle (M=Maya green, S=Sarah blue) + role label + text.
+      slide-in animation on mount.
+
+    MossEntry({ query })
+      Query text + latency badge (green pill) + truncated result.
+
+    ApiLogLine({ icon, text, color })
+      Icon + text row with bottom border divider.
+
+  State (React hooks):
+    status, lead, transcript, mossQueries, pipeline,
+    stripeEvent, memoryRecall, callDuration, errorMsg, lastActivity
+
+  SSE connection (connectSSE):
+    · new EventSource("/api/events")
+    · On message: dispatch to handleEvent() switch
+    · On error: close + setTimeout(connectSSE, 2000) — auto-reconnects
+
+  handleEvent() cases:
+    state, status_change, transcript, moss_query, pipeline_update,
+    stripe_paid, memory_recall, call_ended, email_sent, ping
+
+  Call timer:
+    · setInterval fires when status is "active" or "followup_active"
+    · Clears and resets on "idle"
+
+  API calls (all to http://localhost:8000):
+    · startCampaign()     POST /api/start-campaign
+    · simulatePayment()   POST /api/simulate-payment
+    · triggerFollowup()   POST /api/followup-call
+
+  Custom Tailwind colors (tailwind.config.js):
+    notion.bg, notion.white, notion.border, notion.hover, notion.text,
+    notion.muted, notion.faint, notion.green, notion.greenBg, notion.blue,
+    notion.blueBg, notion.yellow, notion.yellowBg, notion.purple,
+    notion.purpleBg, notion.red, notion.redBg
+
+  Custom animations (index.css):
+    blink   — 1.2s ease-in-out infinite (status dot + badge)
+    slide-in — 0.18s ease-out (transcript bubbles, log lines)
+    wave    — 0.9s scaleY (live waveform bars during active call)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. API ENDPOINTS  (complete)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Method  Path                     Auth      Description
+  ────────────────────────────────────────────────────────────────────────
+  GET     /health                  none      Health check + call state
+  GET     /api/events              none      SSE stream → real-time dashboard
+  POST    /api/start-campaign      none      Create agent + dial lead
+  POST    /api/simulate-payment    none      Manual payment trigger (demo backup)
+  POST    /api/followup-call       none      Show Supermemory recall
+  POST    /webhook/voice           none      AgentPhone voice turn handler
+  POST    /webhook/stripe          none      Stripe payment webhook
+
+  Note: Authentication intentionally omitted for hackathon demo.
+  Production would add API key headers on /api/* routes and
+  Stripe signature verification on /webhook/stripe.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. THE 5-STEP PIPELINE  (dashboard tracker)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Step  Key                 Set by               Trigger
+  ──────────────────────────────────────────────────────────────────────────
+  1     call_connected      main.py              POST /v1/calls succeeds
+  2     objection_handled   voice_handler.py     should_query_moss() returns True
+  3     email_sent          voice_handler.py     AgentMail.send() succeeds
+  4     stripe_paid         main.py              POST /webhook/stripe received
+                                                 OR /api/simulate-payment called
+  5     memory_saved        voice_handler.py     Supermemory.add() succeeds
+                                                 in handle_call_ended()
+
+  Progress bar: (completedSteps / 5) * 100% width, green fill
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. SSE EVENT CATALOG
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Event Type        Payload fields                   Dashboard effect
+  ────────────────────────────────────────────────────────────────────────
+  state             status, pipeline, transcript,     Full sync on connect
+                    moss_queries, stripe_payment_url,
+                    memory_recall
+  status_change     status, lead?                    Header badge updates
+  transcript        role, text                       Bubble added to transcript
+  moss_query        query, result, latency_ms        Row added to Moss log
+  pipeline_update   key, value                       Step turns green + Done pill
+  email_sent        to, payment_url                  API log line added
+  stripe_paid       amount, currency, customer       Payment success card shown
+  memory_recall     content                          Memory card shown
+  call_ended        duration                         Status → Call Ended
+  ping              (empty)                          Keepalive — 25s timeout
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. CONVERSATION STATE MACHINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  State transitions (infer_stage is called on every voice turn):
+
+    INTRO ──────────────→ QUALIFY  (after turn 1–2)
+    QUALIFY ────────────→ PITCH    (after turn 3–4)
+    PITCH ──────────────→ CLOSE    (after turn 5+)
+    CLOSE ──────────────→ CONFIRMED (has_closed = True)
+    Any stage ──────────→ DECLINED  (if hard "no" detected by Gemini)
+
+  Guard rails in handle_voice_turn (checked in order before any logic):
+    Guard 1: call_complete == True  → return fixed "all set" line
+    Guard 2: has_closed == True     → return wrap-up line, set call_complete
+    Guard 3: _is_garbled()          → return "you broke up" line
+
+  [CALL_COMPLETE] token lifecycle:
+    · Gemini outputs token when stage=CONFIRMED and lead says yes
+    · Token stripped from speech before TTS
+    · call_state["has_closed"] = True
+    · call_state["call_complete"] = True
+    · asyncio.create_task(trigger_post_call_pipeline()) — non-blocking
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. VOICE TURN TIMING  (per utterance, target <500ms)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  t=0ms    AgentPhone STT finishes → POST /webhook/voice arrives
+  t=1ms    Guard checks (garbled / closed) — return immediately if triggered
+  t=2ms    turn_count++, transcript.append, emit SSE
+  t=3ms    If turn > 2: yield interim filler ({"text":..., "interim":true})
+           AgentPhone TTS starts speaking filler immediately
+  t=5ms    If should_query_moss(): await query_moss()
+           Moss native SDK: <10ms · keyword fallback: <1ms
+           Emit moss_query SSE event
+  t=10ms   await recall_lead(phone) — Supermemory API call
+           Returns "" on first call, profile on subsequent calls
+  t=15ms   infer_stage() — O(1) based on transcript length
+  t=20ms   Build system_with_stage string (format + append context)
+  t=30ms   Build genai_types.Content list from transcript history
+  t=50ms   run_in_executor → Gemini 2.0 Flash generate_content
+  t=200ms  Strip markdown from response
+  t=205ms  Check for [CALL_COMPLETE] token, close signals
+  t=210ms  Append agent turn, emit SSE transcript event
+  t=215ms  yield final NDJSON → AgentPhone TTS speaks response
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. SERVICES & CREDENTIALS  (current state)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Service        Env Key                Purpose                  Status
+  ─────────────────────────────────────────────────────────────────────────
+  AgentPhone     Agent_phone_key        Voice calls + STT/TTS    Live (sk_live)
+  Gemini 2.0     GEMINI_API_KEY         AI response generation   Live
+  Moss           MOSS_PROJECT_ID/KEY    Real-time FAQ retrieval  SDK fallback*
+  Supermemory    SUPERMEMORY_API_KEY    Lead memory graph        Live
+  AgentMail      Agent_mail_S25         Follow-up emails         Live
+  Stripe         Stripe_secret_key      Payment collection       Test mode
+  ngrok          WEBHOOK_URL            Public tunnel → :8000    Live
+                                        (autotelic-datable-karsyn.ngrok-free.dev)
+
+  * Moss native SDK (inferedge-moss-core) may fail to install from PyPI.
+    MOSS_AVAILABLE flag gracefully falls back to keyword matching.
+    Dashboard still shows realistic <5ms latency from keyword fallback.
+
+  Stripe mode: TEST (sk_test_...) — no real money charged in demo.
+  Webhook URL: https://autotelic-datable-karsyn.ngrok-free.dev (as of May 17)
+               Update WEBHOOK_URL in apex/.env if ngrok URL changes.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14. HOW TO RUN  (three terminals)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Prerequisites:
+    Python 3.11+, Node 18+, ngrok (or localtunnel), pip, npm
+
+  First-time install:
+    cd apex
+    make install
+    # or manually:
+    pip install -r requirements.txt
+    cd frontend && npm install
+
+  Terminal 1 — Tunnel:
+    ngrok http 8000
+    → Copy the https://... URL
+    → Paste into apex/.env:  WEBHOOK_URL=https://xxxx.ngrok.io
+
+  Terminal 2 — Backend:
+    cd apex/backend
+    python -m uvicorn main:app --reload --port 8000
+
+  Terminal 3 — Frontend:
+    cd apex/frontend
+    npm run dev
+
+  Browser:
+    Open: http://localhost:5173
+    Click: ▶ Start Campaign
+
+  Alternative (one command):
+    cd apex && bash start.sh
+    (auto-extracts ngrok URL and updates .env)
+
+  Quick commands (Makefile):
+    make install         Install Python + Node deps
+    make run-backend     Start uvicorn on :8000
+    make run-frontend    Start Vite on :5173
+    make tunnel          Start localtunnel (no auth required)
+    make tunnel-ngrok    Start ngrok (requires authtoken)
+    make dev             Print the 3-terminal startup instructions
+
+  Kill port conflict:
+    lsof -ti:8000 | xargs kill -9
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15. DEMO SCRIPT  (90-second loop)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  0:00  Open http://localhost:5173 — Notion-style white dashboard
+  0:05  Click ▶ Start Campaign — pipeline step 1 turns green
+  0:08  Phone rings at +17143101206 (Sarah's phone)
+  0:12  Maya: "Hi! This is Maya calling from CoreFlow Pilates..."
+  0:20  Sarah: "How is this different from yoga?"
+        → Moss fires in <10ms, step 2 turns green (Objection Handled)
+        → Maya gives pilates vs yoga answer from product knowledge
+  0:35  Sarah: "Okay, sure, send me the link"
+        → Maya: "Perfect! Sending that to your email right now..."
+        → [CALL_COMPLETE] detected
+        → Stripe Checkout Session created ($30)
+        → AgentMail sends email to quachphuwork@gmail.com
+        → Step 3 turns green (Follow-up Email Sent)
+  0:50  Sarah opens email, clicks link, pays $30 on Stripe
+        → POST /webhook/stripe fires
+        → Step 4 turns green (Payment Received)
+        → Payment success card appears on dashboard
+  1:05  Call ends — Supermemory stores full transcript
+        → Step 5 turns green (Memory Saved)
+  1:10  Click 🧠 Trigger Follow-up Call
+        → Supermemory recall shows lead history from first call
+        → Memory card appears in Pipeline panel
+  1:25  All 5/5 steps green — full demo complete
+
+  Demo backup controls (if live services are slow):
+    💳 Simulate Stripe Payment — fires step 4 without real webhook
+    🧠 Trigger Follow-up Call  — fires Supermemory recall manually
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+16. RESILIENCE & FALLBACK MAP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Failure                        Fallback                         Demo impact
+  ─────────────────────────────────────────────────────────────────────────────
+  Moss SDK import fails          MOSS_AVAILABLE=False              None — keyword
+  (inferedge-moss-core missing)  → _keyword_fallback()            fallback <1ms
+  Moss query error               _keyword_fallback()               None
+  Gemini key missing             GEMINI_AVAILABLE=False            Canned responses
+  Gemini API error               _fallback_response(stage)         Stage-aware reply
+  Gemini garbled markdown        Strip *, #, _ post-response       None
+  STT garbled input              _is_garbled() → "broke up" line   Graceful
+  Maya loops after close         Guard 2+3: has_closed / complete  Hard stop
+  Stripe webhook slow/missing    /api/simulate-payment button      Manual trigger
+  Supermemory unavailable        Returns "" → prompt skips context Silent skip
+  Supermemory profile() fails    search.documents() fallback       Silent skip
+  AgentMail inbox missing        initialize_inbox() re-runs        Auto-creates
+  Port 8000 in use               lsof -ti:8000 | xargs kill -9     Manual fix
+  WEBHOOK_URL not set            400 error with clear message      Set in .env
+  ngrok URL expired              Update WEBHOOK_URL in apex/.env   One-line fix
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+17. AGENTPHONE API CALLS  (complete list used in main.py)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  All calls use:
+    base URL: https://api.agentphone.ai
+    header:   Authorization: Bearer {Agent_phone_key}
+    client:   httpx.AsyncClient(timeout=30)
+
+  1. POST /v1/agents
+     Create Maya agent (only on first campaign)
+     Body: {name, voiceMode:"webhook", beginMessage, voice:"Polly.Joanna",
+            sttMode:"accurate", ambientSound:"office"}
+     Response: {id, ...} → stored in _apex_agent_id
+
+  2. POST /v1/webhooks
+     Register webhook endpoint for voice events
+     Body: {url: WEBHOOK_URL + "/webhook/voice", contextLimit: 10}
+
+  3. GET /v1/numbers
+     Fetch provisioned phone numbers
+     Response: {data: [...]} or {items: [...]}
+
+  4. POST /v1/numbers
+     Provision new US number (only if none exist)
+     Body: {country: "US"}
+     Response: {id, ...}
+
+  5. POST /v1/agents/{agentId}/numbers
+     Attach phone number to agent
+     Body: {numberId: number_id}
+
+  6. POST /v1/calls
+     Initiate outbound call
+     Body: {agentId, toNumber, initialGreeting, voice: "Polly.Joanna"}
+     Response: {id, ...} → stored in call_state["call_id"]
+
+  Webhook events received from AgentPhone:
+    · event: "agent.message", channel: "voice"
+      data.transcript — lead utterance text
+    · event: "agent.call_ended"
+      data.durationSeconds — call length in seconds
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+18. KNOWN ISSUES & PRODUCTION NOTES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Issue                        Notes
+  ─────────────────────────────────────────────────────────────────────────
+  In-memory state              call_state is a plain dict — not persisted.
+                               Restart loses all state. Use Redis or
+                               a DB for production multi-tenant use.
+
+  Single lead hardcoded        LEADS = [{...}] in main.py.
+                               Production would load from CRM / CSV / API.
+
+  No auth on API routes        All endpoints open. Add OAuth/API keys.
+
+  No Stripe signature verify   Add stripe.Webhook.construct_event() for
+                               production to prevent spoofed webhooks.
+
+  Moss SDK dependency          inferedge-moss-core not reliably on PyPI.
+                               Keyword fallback compensates for demo.
+                               Check moss.dev for native install path.
+
+  AgentPhone agent reuse       _apex_agent_id is module-level — reused
+                               across calls. Fine for demo, but needs
+                               proper lifecycle management in production.
+
+  asyncio.get_event_loop()     Deprecated pattern for run_in_executor.
+                               Use asyncio.get_running_loop() in Python 3.10+
+                               for production code.
+
+  CORS allow_origins=["*"]     Open for demo. Restrict to specific origins
+                               in production.
+
+  ngrok free tier              URL changes on each session. Use ngrok paid
+                               or a fixed domain (e.g., Railway, Render)
+                               for reliable webhook URLs.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Last updated: May 17, 2026 · Built for YC Call My Agent Hackathon
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
