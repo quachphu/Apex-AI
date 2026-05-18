@@ -1,4 +1,4 @@
-# Apex — AI Outbound Sales Agent
+# Apex — AI Agent Receptionist
 
 **Apex turns a cold lead into a qualified, followed-up, paid customer — fully autonomously.**
 
